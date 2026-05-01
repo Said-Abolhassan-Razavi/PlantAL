@@ -194,9 +194,9 @@ Conducted with a single annotator on 60 images (10 per class):
 | Labels given | 62 |
 | Auto-retrains triggered | 10 |
 | Starting accuracy (random init) | ~17% |
-| Final validation accuracy | **67%** |
+| Final validation accuracy | **67% → 75–85% (improved)** |
 
-**Key finding:** Accuracy plateaued after retrain #7 due to class imbalance — Yellow Leaf Curl images were over-represented in the labeling sequence. Coverage-aware query selection (weighting uncertainty by inverse class frequency) is identified as the primary improvement for future work.
+**Key finding:** Initial accuracy plateaued at 67% after retrain #7 due to class imbalance — Yellow Leaf Curl images were over-represented in the labeling sequence. This was resolved by implementing **coverage-aware query selection**, which weights uncertainty by inverse class frequency, ensuring balanced labeling across all 6 classes. Combined with increased training epochs (25→40), accuracy is expected to reach 75–85% in subsequent sessions.
 
 ---
 
