@@ -1439,6 +1439,16 @@ function updateCoverage() {
 // ═══════════════════════════════════════════════════════════════════════════
 // LABELING FLOW
 // ═══════════════════════════════════════════════════════════════════════════
+function coverageScore(item) {
+  // Combines uncertainty with inverse class coverage:
+  // images predicted to belong to underrepresented classes get a score boost,
+  // preventing the model from over-labeling already well-covered classes.
+  const predictedClass = item.probs.indexOf(Math.max(...item.probs));
+  const maxCount = Math.max(...classCounts, 1);
+  const classWeight = 1 - (classCounts[predictedClass] / (maxCount + 1));
+  return item.uncertainty * (1 + 2.0 * classWeight);
+}
+
 function showMostUncertain() {
   const unlabeled = pool.filter(p => p.label === -1);
   if (!unlabeled.length) {
@@ -1450,7 +1460,8 @@ function showMostUncertain() {
   const pool_ = candidates.length ? candidates : unlabeled;
   // If we exhausted non-skipped items, reset skipped set
   if (!candidates.length) skippedIds.clear();
-  const top = pool_.reduce((a,b) => a.uncertainty > b.uncertainty ? a : b);
+  // Coverage-aware selection: combines uncertainty + inverse class frequency
+  const top = pool_.reduce((a, b) => coverageScore(a) > coverageScore(b) ? a : b);
   selectItem(top.id);
 }
 
@@ -1584,7 +1595,7 @@ async function retrain() {
   const n = labeled.length;
   // Val split only meaningful with 20+ samples (else 1-3 val samples = noise)
   const useVal = n >= 20;
-  const epochs = useVal ? 25 : 20;
+  const epochs = useVal ? 40 : 30;
 
   let lastAcc = 0;
   await classifier.fit(xs, ys, {
