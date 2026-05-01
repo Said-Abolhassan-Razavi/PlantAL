@@ -1357,12 +1357,14 @@ async function rescorePool() {
 // ═══════════════════════════════════════════════════════════════════════════
 function renderPool() {
   const grid = document.getElementById('poolGrid');
-  if (pool.length === 0) {
+  // Only display real (non-augmented) images in the grid
+  const visible = pool.filter(p => !p.augmented);
+  if (visible.length === 0) {
     grid.innerHTML = '<div class="pool-empty">Upload a batch of plant images.<br/>Most uncertain image will appear here.</div>';
     return;
   }
 
-  grid.innerHTML = pool.map(item => {
+  grid.innerHTML = visible.map(item => {
     const uncPct = Math.round(item.uncertainty * 100);
     const uncColor = item.uncertainty > 0.7 ? '#ef4444' : item.uncertainty > 0.4 ? '#f59e0b' : '#22c55e';
     const labelClass = item.label >= 0 ? `labeled-${item.label}` : '';
@@ -1515,6 +1517,36 @@ function showEmpty(msg) {
   document.getElementById('nextBtn').disabled = true;
 }
 
+async function augmentAndAddToPool(item, classIdx) {
+  // Creates 3 augmented copies of a labeled image (flip, brighten, darken)
+  // This effectively multiplies training data 4x per label
+  const imgEl = await loadImageElement(item.url);
+  const augFns = [
+    t => tf.image.flipLeftRight(t),
+    t => t.add(0.15).clipByValue(-1, 1),
+    t => t.sub(0.15).clipByValue(-1, 1),
+  ];
+  for (let i = 0; i < augFns.length; i++) {
+    const augTensor = tf.tidy(() => {
+      const base = tf.browser.fromPixels(imgEl)
+        .resizeBilinear([224, 224])
+        .toFloat().div(127.5).sub(1)
+        .expandDims(0);
+      return augFns[i](base);
+    });
+    const featTensor = tf.tidy(() => extractFeatures(augTensor));
+    const featData = Array.from(await featTensor.data());
+    augTensor.dispose();
+    featTensor.dispose();
+    pool.push({
+      id: 'aug_' + item.id + '_' + i, file: null, url: item.url,
+      features: featData, label: classIdx, uncertainty: 0,
+      probs: CLASSES.map((_, j) => j === classIdx ? 0.95 : 0.01),
+      augmented: true
+    });
+  }
+}
+
 async function submitLabel(classIdx) {
   const item = pool.find(p => p.id === currentId);
   if (!item) return;
@@ -1527,12 +1559,15 @@ async function submitLabel(classIdx) {
   document.getElementById('sLabeled').textContent = labelCount;
   updateCoverage();
 
+  // Generate 3 augmented training copies (flip, brighten, darken)
+  await augmentAndAddToPool(item, classIdx);
+
   // Flash
   const stage = document.getElementById('imageStage');
   stage.style.outline = `3px solid ${CLASSES[classIdx].color}`;
   setTimeout(() => stage.style.outline = 'none', 350);
 
-  log(`Labeled as: ${CLASSES[classIdx].name}`, 'info');
+  log(`Labeled as: ${CLASSES[classIdx].name} (+3 augmented copies)`, 'info');
 
   // Check if we can retrain
   const coveredClasses = classCounts.filter(c => c > 0).length;
