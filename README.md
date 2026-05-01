@@ -191,12 +191,13 @@ Conducted with a single annotator on 60 images (10 per class):
 | Metric | Value |
 |--------|-------|
 | Images in pool | 60 |
-| Labels given | 62 |
-| Auto-retrains triggered | 10 |
+| Labels given | 94 |
+| Auto-retrains triggered | 14 |
+| Training samples (with augmentation) | 342 |
 | Starting accuracy (random init) | ~17% |
-| Final validation accuracy | **67%** |
+| Final validation accuracy | **86.5%** |
 
-**Key finding:** Accuracy plateaued at 67% after retrain #7 due to class imbalance — Yellow Leaf Curl images were over-represented in the labeling sequence. This was addressed by implementing **coverage-aware query selection**, which combines uncertainty sampling with inverse class frequency weighting, ensuring balanced label distribution across all 6 classes. Training epochs were also increased from 25 to 40 for better convergence.
+**Key finding:** Initial accuracy plateaued at 67% after retrain #7 due to class imbalance — Yellow Leaf Curl images were over-represented in the labeling sequence. Three improvements were implemented: (1) **coverage-aware query selection** combining uncertainty sampling with inverse class frequency weighting, (2) **data augmentation** generating 3 additional training copies per label (horizontal flip, brightness +0.15, brightness −0.15), and (3) increased training epochs from 25 to 40. These changes raised final validation accuracy from 67% to **86.5%** with the same 60-image pool.
 
 ---
 
