@@ -1,0 +1,2145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PlantAL v2 — Multi-Disease Active Learning</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tensorflow/4.10.0/tf.min.js"></script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Fraunces:ital,wght@0,300;0,600;0,900;1,300&display=swap');
+
+:root {
+  --bg:       #f5f2eb;
+  --bg2:      #edeae0;
+  --bg3:      #e4e0d4;
+  --ink:      #1a1a14;
+  --ink2:     #4a4a38;
+  --ink3:     #8a8a72;
+  --accent:   #2d6a2d;
+  --accent2:  #4a9e4a;
+  --red:      #b83232;
+  --border:   #ccc9bb;
+  --mono:     'DM Mono', monospace;
+  --serif:    'Fraunces', serif;
+
+  --c0: #2d6a2d; /* healthy - green */
+  --c1: #8b4513; /* early blight - brown */
+  --c2: #1a3a6e; /* late blight - dark blue */
+  --c3: #6e4a1a; /* leaf mold - tan */
+  --c4: #6e1a1a; /* bacterial spot - dark red */
+  --c5: #8b6914; /* yellow curl - amber */
+}
+
+* { margin:0; padding:0; box-sizing:border-box; }
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--mono);
+  min-height: 100vh;
+  font-size: 13px;
+}
+
+/* Grain texture overlay */
+body::before {
+  content:'';
+  position:fixed;
+  inset:0;
+  opacity:0.04;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+  background-size: 200px;
+  pointer-events:none;
+  z-index:999;
+}
+
+/* ── Loading ── */
+#loadingOverlay {
+  position:fixed; inset:0;
+  background:var(--bg);
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  gap:24px;
+  z-index:200;
+}
+
+.load-title {
+  font-family: var(--serif);
+  font-size: 52px;
+  font-weight: 900;
+  letter-spacing: -3px;
+  color: var(--ink);
+  line-height:1;
+}
+
+.load-title em {
+  font-style: italic;
+  color: var(--accent);
+}
+
+.load-bar-wrap {
+  width: 320px;
+  height: 3px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.load-bar {
+  height:100%;
+  background: var(--accent);
+  transition: width 0.3s;
+  width:0%;
+}
+
+.load-sub {
+  font-size:11px;
+  color:var(--ink3);
+  letter-spacing:1px;
+  text-transform:uppercase;
+}
+
+/* ── App shell ── */
+#app { display:none; }
+
+.top-bar {
+  background: var(--ink);
+  color: var(--bg);
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  padding: 0 28px;
+  height: 52px;
+  position: sticky;
+  top:0;
+  z-index:10;
+}
+
+.top-logo {
+  font-family: var(--serif);
+  font-size: 22px;
+  font-weight: 900;
+  letter-spacing: -1px;
+}
+
+.top-logo em { font-style:italic; color: var(--accent2); }
+
+.top-stats {
+  display:flex;
+  gap:32px;
+}
+
+.tstat {
+  text-align:center;
+}
+
+.tstat-val {
+  font-size:18px;
+  font-weight:500;
+  color: var(--accent2);
+  line-height:1;
+}
+
+.tstat-lbl {
+  font-size:9px;
+  color: rgba(255,255,255,0.4);
+  text-transform:uppercase;
+  letter-spacing:1.5px;
+  margin-top:2px;
+}
+
+.top-status {
+  display:flex;
+  align-items:center;
+  gap:8px;
+  font-size:11px;
+  color:rgba(255,255,255,0.5);
+}
+
+.pulse {
+  width:7px; height:7px;
+  border-radius:50%;
+  background: var(--accent2);
+  animation: pulse 2s infinite;
+}
+
+.pulse.training { background: #f59e0b; animation-duration:0.5s; }
+.pulse.idle { background: #6b7280; animation: none; }
+
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+/* ── Layout ── */
+.layout {
+  display:grid;
+  grid-template-columns: 280px 1fr 300px;
+  height: calc(100vh - 52px);
+  overflow: hidden;
+}
+
+/* ── Left: pool ── */
+.pool-panel {
+  background: var(--bg2);
+  border-right: 1px solid var(--border);
+  display:flex;
+  flex-direction:column;
+  overflow:hidden;
+}
+
+.panel-header {
+  padding: 16px;
+  border-bottom: 1px solid var(--border);
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  flex-shrink:0;
+}
+
+.panel-title {
+  font-size:10px;
+  text-transform:uppercase;
+  letter-spacing:2px;
+  color:var(--ink3);
+  font-weight:500;
+}
+
+.pool-count {
+  font-size:11px;
+  color:var(--ink3);
+}
+
+.upload-btn {
+  width:100%;
+  padding: 12px;
+  background: var(--ink);
+  color: var(--bg);
+  border:none;
+  font-family:var(--mono);
+  font-size:12px;
+  cursor:pointer;
+  transition:background 0.15s;
+  flex-shrink:0;
+  letter-spacing:0.5px;
+}
+
+.upload-btn:hover { background: var(--accent); }
+#poolFileInput { display:none; }
+
+.pool-grid {
+  flex:1;
+  overflow-y:auto;
+  padding:8px;
+  display:grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap:4px;
+  align-content:start;
+}
+
+.pool-thumb {
+  aspect-ratio:1;
+  border-radius:4px;
+  overflow:hidden;
+  cursor:pointer;
+  position:relative;
+  border: 2px solid transparent;
+  transition: border-color 0.15s;
+}
+
+.pool-thumb img {
+  width:100%;
+  height:100%;
+  object-fit:cover;
+  display:block;
+}
+
+.pool-thumb.active { border-color: var(--ink); }
+.pool-thumb.labeled-0 { border-color: var(--c0); }
+.pool-thumb.labeled-1 { border-color: var(--c1); }
+.pool-thumb.labeled-2 { border-color: var(--c2); }
+.pool-thumb.labeled-3 { border-color: var(--c3); }
+.pool-thumb.labeled-4 { border-color: var(--c4); }
+.pool-thumb.labeled-5 { border-color: var(--c5); }
+
+.pool-unc-bar {
+  position:absolute;
+  bottom:0; left:0; right:0;
+  height:3px;
+  background:rgba(0,0,0,0.2);
+}
+
+.pool-unc-fill {
+  height:100%;
+  transition: width 0.4s, background 0.4s;
+}
+
+.pool-label-badge {
+  position:absolute;
+  top:3px; right:3px;
+  width:14px; height:14px;
+  border-radius:50%;
+  display:none;
+  align-items:center;
+  justify-content:center;
+  font-size:8px;
+  color:white;
+}
+
+.pool-thumb.labeled-0 .pool-label-badge,
+.pool-thumb.labeled-1 .pool-label-badge,
+.pool-thumb.labeled-2 .pool-label-badge,
+.pool-thumb.labeled-3 .pool-label-badge,
+.pool-thumb.labeled-4 .pool-label-badge,
+.pool-thumb.labeled-5 .pool-label-badge { display:flex; }
+
+/* ── Center: labeling ── */
+.label-panel {
+  display:flex;
+  flex-direction:column;
+  overflow:hidden;
+  background: var(--bg);
+}
+
+.image-stage {
+  flex:1;
+  overflow:hidden;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  position:relative;
+  background: var(--bg3);
+  border-bottom: 1px solid var(--border);
+}
+
+.stage-img {
+  max-width:100%;
+  max-height:100%;
+  object-fit:contain;
+  display:none;
+}
+
+.stage-empty {
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  gap:12px;
+  color:var(--ink3);
+}
+
+.stage-empty-icon {
+  font-size:56px;
+  opacity:0.3;
+}
+
+.stage-empty p {
+  font-size:13px;
+  text-align:center;
+  line-height:1.6;
+}
+
+/* Uncertainty overlay on image */
+.unc-overlay {
+  position:absolute;
+  top:12px; left:12px;
+  background:rgba(0,0,0,0.75);
+  color:white;
+  padding:6px 12px;
+  border-radius:4px;
+  font-size:11px;
+  backdrop-filter:blur(4px);
+  display:none;
+}
+
+.unc-high { color: #f87171; }
+.unc-med  { color: #fbbf24; }
+.unc-low  { color: #4ade80; }
+
+/* rank badge */
+.rank-overlay {
+  position:absolute;
+  top:12px; right:12px;
+  background:rgba(0,0,0,0.75);
+  color:white;
+  padding:6px 12px;
+  border-radius:4px;
+  font-size:11px;
+  backdrop-filter:blur(4px);
+  display:none;
+}
+
+/* ── Confidence bars ── */
+.conf-section {
+  padding:16px 20px;
+  border-bottom:1px solid var(--border);
+  flex-shrink:0;
+}
+
+.conf-title {
+  font-size:9px;
+  text-transform:uppercase;
+  letter-spacing:2px;
+  color:var(--ink3);
+  margin-bottom:10px;
+}
+
+.conf-bars { display:flex; flex-direction:column; gap:6px; }
+
+.cbar-row {
+  display:flex;
+  align-items:center;
+  gap:8px;
+}
+
+.cbar-name {
+  width:130px;
+  font-size:11px;
+  color:var(--ink2);
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+
+.cbar-track {
+  flex:1;
+  height:6px;
+  background:var(--bg3);
+  border-radius:3px;
+  overflow:hidden;
+}
+
+.cbar-fill {
+  height:100%;
+  border-radius:3px;
+  transition: width 0.5s cubic-bezier(0.4,0,0.2,1);
+}
+
+.cbar-pct {
+  width:34px;
+  text-align:right;
+  font-size:10px;
+  color:var(--ink3);
+}
+
+/* ── Disease label buttons ── */
+.label-section {
+  padding:16px 20px;
+  flex-shrink:0;
+}
+
+.label-title {
+  font-size:9px;
+  text-transform:uppercase;
+  letter-spacing:2px;
+  color:var(--ink3);
+  margin-bottom:10px;
+}
+
+.disease-grid {
+  display:grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap:8px;
+}
+
+.disease-btn {
+  padding:10px 8px;
+  border-radius:5px;
+  border:1px solid;
+  font-family:var(--mono);
+  font-size:10px;
+  cursor:pointer;
+  transition:all 0.12s;
+  text-align:center;
+  line-height:1.3;
+  font-weight:500;
+}
+
+.disease-btn:disabled { opacity:0.3; cursor:not-allowed; }
+.disease-btn:not(:disabled):active { transform:scale(0.96); }
+
+.db-0 { background:#f0fff0; border-color:var(--c0); color:var(--c0); }
+.db-0:not(:disabled):hover { background:var(--c0); color:white; }
+
+.db-1 { background:#fff5f0; border-color:var(--c1); color:var(--c1); }
+.db-1:not(:disabled):hover { background:var(--c1); color:white; }
+
+.db-2 { background:#f0f4ff; border-color:var(--c2); color:var(--c2); }
+.db-2:not(:disabled):hover { background:var(--c2); color:white; }
+
+.db-3 { background:#fdf8f0; border-color:var(--c3); color:var(--c3); }
+.db-3:not(:disabled):hover { background:var(--c3); color:white; }
+
+.db-4 { background:#fff0f0; border-color:var(--c4); color:var(--c4); }
+.db-4:not(:disabled):hover { background:var(--c4); color:white; }
+
+.db-5 { background:#fffbf0; border-color:var(--c5); color:var(--c5); }
+.db-5:not(:disabled):hover { background:var(--c5); color:white; }
+
+.next-btn {
+  width:100%;
+  margin-top:10px;
+  padding:10px;
+  background:transparent;
+  border:1px solid var(--border);
+  color:var(--ink3);
+  font-family:var(--mono);
+  font-size:11px;
+  cursor:pointer;
+  border-radius:5px;
+  transition:all 0.12s;
+  letter-spacing:0.5px;
+}
+
+.next-btn:hover { border-color:var(--ink); color:var(--ink); }
+.next-btn:disabled { opacity:0.3; cursor:not-allowed; }
+
+/* ── Right: info panel ── */
+.info-panel {
+  background:var(--bg2);
+  border-left:1px solid var(--border);
+  display:flex;
+  flex-direction:column;
+  overflow:hidden;
+}
+
+.info-section {
+  padding:16px;
+  border-bottom:1px solid var(--border);
+  flex-shrink:0;
+}
+
+.info-title {
+  font-size:9px;
+  text-transform:uppercase;
+  letter-spacing:2px;
+  color:var(--ink3);
+  margin-bottom:12px;
+}
+
+/* Class coverage */
+.coverage-list {
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+}
+
+.cov-row {
+  display:flex;
+  align-items:center;
+  gap:8px;
+}
+
+.cov-dot {
+  width:8px; height:8px;
+  border-radius:50%;
+  flex-shrink:0;
+}
+
+.cov-name { flex:1; font-size:10px; color:var(--ink2); }
+.cov-count { font-size:10px; color:var(--ink3); width:20px; text-align:right; }
+.cov-bar-track { width:60px; height:4px; background:var(--bg3); border-radius:2px; overflow:hidden; }
+.cov-bar-fill { height:100%; border-radius:2px; transition:width 0.4s; }
+
+/* Chart */
+.chart-section {
+  padding:16px;
+  border-bottom:1px solid var(--border);
+  flex-shrink:0;
+}
+
+.chart-wrap { height:120px; margin-top:10px; position:relative; }
+canvas { width:100% !important; height:100% !important; }
+
+/* Log */
+.log-section {
+  padding:16px;
+  flex:1;
+  overflow:hidden;
+  display:flex;
+  flex-direction:column;
+}
+
+.log-scroll {
+  flex:1;
+  overflow-y:auto;
+  display:flex;
+  flex-direction:column-reverse;
+  gap:2px;
+  margin-top:10px;
+}
+
+.log-entry {
+  font-size:10px;
+  color:var(--ink3);
+  line-height:1.5;
+  padding:1px 0;
+}
+
+.log-entry.good { color: var(--accent); }
+.log-entry.warn { color: #b45309; }
+.log-entry.err  { color: var(--red); }
+.log-entry.info { color: var(--ink2); }
+
+/* Retrain button */
+.retrain-btn {
+  margin:12px 16px;
+  padding:10px;
+  background:var(--ink);
+  color:var(--bg);
+  border:none;
+  font-family:var(--mono);
+  font-size:11px;
+  cursor:pointer;
+  border-radius:5px;
+  transition:background 0.15s;
+  letter-spacing:0.5px;
+  flex-shrink:0;
+}
+
+.retrain-btn:hover { background:var(--accent); }
+.retrain-btn:disabled { opacity:0.4; cursor:not-allowed; }
+
+/* Flash animations */
+@keyframes flash-border {
+  0%   { outline: 3px solid var(--flash-color); }
+  100% { outline: 3px solid transparent; }
+}
+
+.flash { animation: flash-border 0.35s ease-out; }
+
+/* Scrollbar */
+::-webkit-scrollbar { width:4px; }
+::-webkit-scrollbar-track { background:transparent; }
+::-webkit-scrollbar-thumb { background:var(--border); border-radius:2px; }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Pool empty state */
+.pool-empty {
+  grid-column:span 3;
+  padding:20px;
+  text-align:center;
+  color:var(--ink3);
+  font-size:11px;
+  line-height:1.8;
+}
+
+/* ── Tabs ── */
+.tab-bar {
+  display:flex;
+  gap:2px;
+  padding: 0 28px;
+  background: #111;
+  border-bottom: 1px solid #222;
+}
+
+.tab-btn {
+  padding: 10px 20px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: rgba(255,255,255,0.4);
+  font-family: var(--mono);
+  font-size: 11px;
+  cursor: pointer;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  transition: all 0.15s;
+}
+
+.tab-btn:hover { color: rgba(255,255,255,0.7); }
+.tab-btn.active { color: var(--accent2); border-bottom-color: var(--accent2); }
+
+.tab-content { display:none; }
+.tab-content.active { display:block; }
+
+/* ── Field Assistant Tab ── */
+.field-layout {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0;
+  height: calc(100vh - 94px);
+  overflow: hidden;
+  min-height: 0;
+}
+
+.field-left {
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.field-right {
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 24px;
+  gap: 20px;
+  background: var(--bg);
+  height: 100%;
+  min-height: 0;
+}
+
+.result-card {
+  flex-shrink: 0;
+}
+
+.feedback-card {
+  flex-shrink: 0;
+}
+
+.field-drop {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  cursor: pointer;
+  background: var(--bg3);
+  border-bottom: 1px solid var(--border);
+  position: relative;
+  overflow: hidden;
+  transition: background 0.15s;
+}
+
+.field-drop:hover { background: var(--bg2); }
+
+.field-drop img#fieldPreview {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: none;
+  background: var(--bg3);
+}
+
+.field-drop-text {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  color: var(--ink3);
+  z-index: 1;
+  pointer-events: none;
+}
+
+.field-drop-text .icon { font-size: 48px; opacity: 0.3; }
+
+.field-analyze-btn {
+  width: 100%;
+  padding: 14px;
+  background: var(--ink);
+  color: var(--bg);
+  border: none;
+  font-family: var(--mono);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s;
+  flex-shrink: 0;
+  letter-spacing: 0.5px;
+}
+
+.field-analyze-btn:hover:not(:disabled) { background: var(--accent); }
+.field-analyze-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* Result card */
+.result-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  display: none;
+}
+
+.result-card.show { display: block; }
+
+.result-header {
+  padding: 16px 20px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.result-disease-dot {
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.result-disease-name {
+  font-family: var(--serif);
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.5px;
+}
+
+.result-conf {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--ink3);
+  text-align: right;
+}
+
+.result-body { padding: 0 20px 20px; }
+
+.result-section-title {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  color: var(--ink3);
+  margin: 14px 0 8px;
+}
+
+.result-desc {
+  font-size: 12px;
+  color: var(--ink2);
+  line-height: 1.7;
+}
+
+.treatment-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.treatment-item {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 8px 12px;
+  background: var(--bg);
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--ink2);
+  line-height: 1.5;
+}
+
+.treatment-item .step {
+  font-weight: 500;
+  color: var(--accent);
+  flex-shrink: 0;
+  font-size: 10px;
+  margin-top: 1px;
+}
+
+/* Feedback section */
+.feedback-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 20px;
+  display: none;
+}
+
+.feedback-card.show { display: block; }
+
+.feedback-title {
+  font-family: var(--serif);
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.feedback-sub {
+  font-size: 11px;
+  color: var(--ink3);
+  margin-bottom: 16px;
+  line-height: 1.6;
+}
+
+.feedback-btns {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.feedback-btn {
+  padding: 12px 8px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  font-family: var(--mono);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.12s;
+  text-align: center;
+  color: var(--ink2);
+}
+
+.feedback-btn:hover { border-color: var(--ink); color: var(--ink); }
+.feedback-btn.selected-worked { background: #f0fff0; border-color: var(--c0); color: var(--c0); }
+.feedback-btn.selected-partial { background: #fffbf0; border-color: #8b6914; color: #8b6914; }
+.feedback-btn.selected-failed { background: #fff0f0; border-color: var(--red); color: var(--red); }
+
+.feedback-submit {
+  width: 100%;
+  padding: 11px;
+  background: var(--ink);
+  color: var(--bg);
+  border: none;
+  font-family: var(--mono);
+  font-size: 11px;
+  cursor: pointer;
+  border-radius: 5px;
+  transition: background 0.15s;
+  letter-spacing: 0.5px;
+}
+
+.feedback-submit:hover:not(:disabled) { background: var(--accent); }
+.feedback-submit:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* Feedback history */
+.fb-history {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  display: none;
+}
+
+.fb-history.show { display: block; }
+
+.fb-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.fb-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--bg);
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  font-size: 11px;
+}
+
+.fb-item img { width:32px; height:32px; border-radius:4px; object-fit:cover; }
+.fb-item-info { flex:1; }
+.fb-item-disease { font-weight:500; color:var(--ink); }
+.fb-item-outcome { font-size:10px; color:var(--ink3); }
+
+.fb-badge {
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 1px;
+}
+
+.fb-worked  { background:#f0fff0; color:var(--c0); }
+.fb-partial { background:#fffbf0; color:#8b6914; }
+.fb-failed  { background:#fff0f0; color:var(--red); }
+
+/* No model warning */
+.no-model-warn {
+  background: #fffbf0;
+  border: 1px solid #d97706;
+  border-radius: 6px;
+  padding: 12px 16px;
+  font-size: 11px;
+  color: #92400e;
+  line-height: 1.6;
+  display: none;
+}
+
+.no-model-warn.show { display: block; }
+
+</style>
+</head>
+<body>
+
+<!-- Loading -->
+<div id="loadingOverlay">
+  <div class="load-title">Plant<em>AL</em></div>
+  <div class="load-bar-wrap"><div class="load-bar" id="loadBar"></div></div>
+  <div class="load-sub" id="loadSub">Initializing TensorFlow.js</div>
+</div>
+
+<!-- App -->
+<div id="app">
+  <div class="top-bar">
+    <div class="top-logo">Plant<em>AL</em> <span style="font-size:12px;font-family:var(--mono);color:rgba(255,255,255,0.3);font-style:normal;font-weight:400">v2 · Multi-Disease</span></div>
+    <div class="top-stats">
+      <div class="tstat"><div class="tstat-val" id="sPool">0</div><div class="tstat-lbl">Pool</div></div>
+      <div class="tstat"><div class="tstat-val" id="sLabeled">0</div><div class="tstat-lbl">Labeled</div></div>
+      <div class="tstat"><div class="tstat-val" id="sAcc">—</div><div class="tstat-lbl">Accuracy</div></div>
+      <div class="tstat"><div class="tstat-val" id="sRetrains">0</div><div class="tstat-lbl">Retrains</div></div>
+    </div>
+    <div class="top-status">
+      <div class="pulse idle" id="pulseEl"></div>
+      <span id="statusText">Ready</span>
+    </div>
+  </div>
+
+  <!-- Tab bar -->
+  <div class="tab-bar">
+    <button class="tab-btn active" onclick="switchTab('train', this)">🌿 Label & Train</button>
+    <button class="tab-btn" onclick="switchTab('field', this)">🔬 Field Assistant</button>
+  </div>
+
+  <!-- Tab: Label & Train -->
+  <div class="tab-content active" id="tab-train">
+  <div class="layout">
+
+    <!-- LEFT: Pool -->
+    <div class="pool-panel">
+      <div class="panel-header">
+        <span class="panel-title">Image Pool</span>
+        <span class="pool-count" id="poolCount">0 images</span>
+      </div>
+      <button class="upload-btn" onclick="document.getElementById('poolFileInput').click()">
+        + Upload Images (batch)
+      </button>
+      <input type="file" id="poolFileInput" multiple accept="image/*"/>
+      <div class="pool-grid" id="poolGrid">
+        <div class="pool-empty">Upload a batch of plant images.<br/>The model will rank them<br/>by uncertainty automatically.</div>
+      </div>
+    </div>
+
+    <!-- CENTER: Labeling -->
+    <div class="label-panel">
+      <div class="image-stage" id="imageStage">
+        <img class="stage-img" id="stageImg" alt=""/>
+        <div class="stage-empty" id="stageEmpty">
+          <div class="stage-empty-icon">🌿</div>
+          <p>Upload images to the pool<br/>Most uncertain image will appear here</p>
+        </div>
+        <div class="unc-overlay" id="uncOverlay"></div>
+        <div class="rank-overlay" id="rankOverlay"></div>
+      </div>
+
+      <div class="conf-section">
+        <div class="conf-title">Model Confidence Distribution</div>
+        <div class="conf-bars" id="confBars">
+          <!-- filled by JS -->
+        </div>
+      </div>
+
+      <div class="label-section">
+        <div class="label-title">Assign Disease Label</div>
+        <div class="disease-grid" id="diseaseGrid">
+          <!-- filled by JS -->
+        </div>
+        <button class="next-btn" id="nextBtn" disabled onclick="skipCurrent()">→ Skip (show next uncertain)</button>
+      </div>
+    </div>
+
+    <!-- RIGHT: Info -->
+    <div class="info-panel">
+
+      <div class="info-section">
+        <div class="info-title">Class Coverage</div>
+        <div class="coverage-list" id="coverageList"></div>
+      </div>
+
+      <div class="chart-section">
+        <div class="info-title">Accuracy vs Labels</div>
+        <div class="chart-wrap"><canvas id="accChart"></canvas></div>
+      </div>
+
+      <button class="retrain-btn" id="retrainBtn" disabled onclick="retrain()">
+        ⟳ Retrain Model
+      </button>
+
+      <div class="log-section">
+        <div class="info-title">Training Log</div>
+        <div class="log-scroll" id="logScroll">
+          <div class="log-entry info">// PlantAL v2 ready</div>
+          <div class="log-entry info">// 6 classes: Healthy, Early Blight, Late Blight,</div>
+          <div class="log-entry info">//   Leaf Mold, Bacterial Spot, Yellow Curl</div>
+          <div class="log-entry info">// Upload your plant images to begin</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+  </div><!-- end tab-train -->
+
+  <!-- Tab: Field Assistant -->
+  <div class="tab-content" id="tab-field">
+    <div class="field-layout">
+
+      <!-- Left: image upload -->
+      <div class="field-left">
+        <div class="field-drop" id="fieldDrop" onclick="document.getElementById('fieldFileInput').click()">
+          <img id="fieldPreview" alt=""/>
+          <div class="field-drop-text" id="fieldDropText">
+            <div class="icon">📷</div>
+            <span style="font-size:12px;text-align:center;line-height:1.7">
+              Upload a photo from your field<br/>
+              <span style="font-size:10px;opacity:0.6">The model will diagnose the disease</span>
+            </span>
+          </div>
+        </div>
+        <input type="file" id="fieldFileInput" accept="image/*" style="display:none"/>
+        <button class="field-analyze-btn" id="fieldAnalyzeBtn" disabled onclick="analyzeField()">
+          Analyze Plant →
+        </button>
+      </div>
+
+      <!-- Right: results + feedback -->
+      <div class="field-right">
+
+        <div class="no-model-warn" id="noModelWarn">
+          ⚠️ No trained model yet. Go to the <strong>Label &amp; Train</strong> tab first, upload images and label at least 10 samples to train the model before using the Field Assistant.
+        </div>
+
+        <!-- Disease result -->
+        <div class="result-card" id="resultCard">
+          <div class="result-header">
+            <div class="result-disease-dot" id="resultDot"></div>
+            <div class="result-disease-name" id="resultName">—</div>
+            <div class="result-conf" id="resultConf"></div>
+          </div>
+          <div class="result-body">
+            <div class="result-section-title">About this disease</div>
+            <div class="result-desc" id="resultDesc"></div>
+
+            <div class="result-section-title">Recommended Treatment</div>
+            <div class="treatment-list" id="treatmentList"></div>
+
+            <div class="result-section-title">Severity &amp; Urgency</div>
+            <div class="result-desc" id="resultUrgency"></div>
+          </div>
+        </div>
+
+        <!-- Trigger feedback after treatment applied -->
+        <button id="showFeedbackBtn" style="display:none;width:100%;padding:13px;background:transparent;border:1px solid var(--border);border-radius:8px;font-family:var(--mono);font-size:11px;color:var(--ink3);cursor:pointer;letter-spacing:0.5px;transition:all 0.15s"
+          onmouseover="this.style.borderColor='var(--accent)';this.style.color='var(--accent)'"
+          onmouseout="this.style.borderColor='var(--border)';this.style.color='var(--ink3)'"
+          onclick="this.style.display='none';document.getElementById('feedbackCard').classList.add('show')">
+          ✓ I applied the treatment — report outcome
+        </button>
+
+        <!-- Feedback -->
+        <div class="feedback-card" id="feedbackCard">
+          <div class="feedback-title">Did the treatment work?</div>
+          <div class="feedback-sub">Describe what happened after you applied the treatment. Be specific — the AI reads your exact words to generate better recommendations next time.</div>
+          <textarea id="fbText" placeholder="Describe what happened... e.g. 'Applied copper spray for 3 days, spots kept spreading and turned black'" 
+            style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:6px;font-family:var(--mono);font-size:11px;color:var(--ink);background:var(--bg);resize:vertical;min-height:80px;outline:none;line-height:1.6;margin-bottom:10px"
+            oninput="document.getElementById('fbSubmit').disabled = this.value.trim().length < 5"></textarea>
+          <button class="feedback-submit" id="fbSubmit" disabled onclick="submitFeedback()">
+            Submit Feedback → Model Will Learn
+          </button>
+        </div>
+
+        <!-- Feedback history -->
+        <div class="fb-history" id="fbHistory">
+          <div class="info-title" style="font-size:9px;text-transform:uppercase;letter-spacing:2px;color:var(--ink3)">Feedback History</div>
+          <div class="fb-history-list" id="fbHistoryList"></div>
+        </div>
+
+      </div>
+    </div>
+  </div><!-- end tab-field -->
+
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════════════
+// CONFIG
+// ═══════════════════════════════════════════════════════════════════════════
+const CLASSES = [
+  { name: 'Healthy',          short: 'Healthy',     color: '#2d6a2d' },
+  { name: 'Early Blight',     short: 'Early Blt.',  color: '#8b4513' },
+  { name: 'Late Blight',      short: 'Late Blt.',   color: '#1a3a6e' },
+  { name: 'Leaf Mold',        short: 'Leaf Mold',   color: '#6e4a1a' },
+  { name: 'Bacterial Spot',   short: 'Bact. Spot',  color: '#6e1a1a' },
+  { name: 'Yellow Leaf Curl', short: 'Yel. Curl',   color: '#8b6914' },
+];
+const N_CLASSES = CLASSES.length;
+const AUTO_RETRAIN_EVERY = 5; // labels
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STATE
+// ═══════════════════════════════════════════════════════════════════════════
+let mobileNet = null;
+let truncatedNet = null; // cached truncated feature extractor
+let classifier = null;
+let isReady = false;
+let isTraining = false;
+
+// Pool: array of { id, file, url, tensor(224x224x3), features(Float32Array), label(int|-1), uncertainty(0-1) }
+let pool = [];
+let currentId = null; // id of image being labeled
+let skippedIds = new Set(); // ids skipped by user in current round
+let labelCount = 0;
+let labelsSinceRetrain = 0;
+let retrainCount = 0;
+let accHistory = [];
+let classCounts = new Array(N_CLASSES).fill(0);
+let featureSize = null;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INIT
+// ═══════════════════════════════════════════════════════════════════════════
+async function init() {
+  setLoad('Initializing TensorFlow.js...', 10);
+  await tf.ready();
+
+  setLoad('Loading MobileNetV1 feature extractor...', 30);
+  mobileNet = await tf.loadLayersModel(
+    'https://storage.googleapis.com/tfjs-models/tfjs/mobilenet_v1_0.25_224/model.json'
+  );
+
+  setLoad('Measuring feature dimensions...', 70);
+  // Build truncated model once and cache it
+  truncatedNet = tf.model({
+    inputs: mobileNet.inputs,
+    outputs: mobileNet.layers[mobileNet.layers.length - 5].output
+  });
+  const dummy = tf.zeros([1,224,224,3]);
+  const feat = extractFeatures(dummy);
+  featureSize = feat.shape[1];
+  feat.dispose(); dummy.dispose();
+
+  setLoad('Building classifier head...', 85);
+  buildHead();
+  buildUI();
+
+  setLoad('Ready!', 100);
+  await delay(300);
+  document.getElementById('loadingOverlay').style.display = 'none';
+  document.getElementById('app').style.display = 'block';
+  isReady = true;
+  log('System ready. Upload plant images to begin.', 'info');
+}
+
+function setLoad(txt, pct) {
+  document.getElementById('loadSub').textContent = txt;
+  document.getElementById('loadBar').style.width = pct + '%';
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MODEL
+// ═══════════════════════════════════════════════════════════════════════════
+function extractFeatures(imgTensor) {
+  // Use cached truncated model (built once in init)
+  const out = truncatedNet.predict(imgTensor);
+  // Flatten spatial dims if needed
+  if (out.rank > 2) {
+    const flat = out.reshape([out.shape[0], -1]);
+    out.dispose();
+    return flat;
+  }
+  return out;
+}
+
+function buildHead() {
+  if (classifier) { try { classifier.dispose(); } catch(e){} }
+  classifier = tf.sequential();
+  classifier.add(tf.layers.dense({ inputShape:[featureSize], units:128, activation:'relu',
+    kernelRegularizer: tf.regularizers.l2({l2: 0.001}) }));
+  classifier.add(tf.layers.dropout({ rate:0.4 }));
+  classifier.add(tf.layers.dense({ units:64, activation:'relu' }));
+  classifier.add(tf.layers.dropout({ rate:0.3 }));
+  classifier.add(tf.layers.dense({ units:N_CLASSES, activation:'softmax' }));
+  classifier.compile({
+    optimizer: tf.train.adam(0.001),
+    loss: 'categoricalCrossentropy',
+    metrics: ['accuracy']
+  });
+}
+
+async function inferSingle(features1d) {
+  // features1d: Float32Array of length featureSize
+  const t = tf.tensor2d([Array.from(features1d)], [1, featureSize]);
+  const predTensor = classifier.predict(t);
+  const probs = await predTensor.data();
+  predTensor.dispose();
+  t.dispose();
+  return Array.from(probs);
+}
+
+function entropy(probs) {
+  let h = 0;
+  for (const p of probs) {
+    if (p > 1e-9) h -= p * Math.log(p);
+  }
+  return h / Math.log(N_CLASSES); // normalized 0-1
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// POOL MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════
+document.getElementById('poolFileInput').addEventListener('change', async e => {
+  const files = Array.from(e.target.files);
+  if (!files.length) return;
+  e.target.value = '';
+  await addFilesToPool(files);
+});
+
+async function addFilesToPool(files) {
+  setStatus('processing', `Processing ${files.length} images...`);
+  log(`Adding ${files.length} images to pool`, 'info');
+
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    const url = URL.createObjectURL(file);
+    const id = Date.now() + '_' + i;
+
+    // Load image and extract features
+    const imgEl = await loadImageElement(url);
+    const imgTensor = tf.tidy(() =>
+      tf.browser.fromPixels(imgEl)
+        .resizeBilinear([224,224])
+        .toFloat().div(127.5).sub(1)
+        .expandDims(0)
+    );
+    const featTensor = tf.tidy(() => extractFeatures(imgTensor));
+    const featData = await featTensor.data();
+    imgTensor.dispose();
+    featTensor.dispose();
+
+    pool.push({
+      id, file, url,
+      features: Array.from(featData),
+      label: -1,
+      uncertainty: 1.0, // max uncertainty until we have a model
+      probs: new Array(N_CLASSES).fill(1/N_CLASSES)
+    });
+
+    if (i % 5 === 0) setLoad(`Processing ${i+1}/${files.length}...`, Math.round(i/files.length*100));
+  }
+
+  document.getElementById('sPool').textContent = pool.length;
+  document.getElementById('poolCount').textContent = pool.length + ' images';
+
+  // Only rescore if a model has been trained at least once
+  if (retrainCount > 0) {
+    await rescorePool();
+  }
+
+  renderPool();
+  showMostUncertain();
+  setStatus('ready', 'Ready');
+  log(`Pool now has ${pool.length} images`, 'info');
+}
+
+function loadImageElement(url) {
+  return new Promise((res, rej) => {
+    const img = new Image();
+    img.onload = () => res(img);
+    img.onerror = rej;
+    img.src = url;
+  });
+}
+
+async function rescorePool() {
+  // Run inference on all unlabeled pool items and update uncertainty
+  const unlabeled = pool.filter(p => p.label === -1);
+  for (const item of unlabeled) {
+    const probs = await inferSingle(item.features);
+    item.probs = probs;
+    item.uncertainty = entropy(probs);
+  }
+  // Sort pool: unlabeled by uncertainty desc, labeled at end
+  pool.sort((a, b) => {
+    if (a.label === -1 && b.label === -1) return b.uncertainty - a.uncertainty;
+    if (a.label === -1) return -1;
+    if (b.label === -1) return 1;
+    return 0;
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// UI — Pool grid
+// ═══════════════════════════════════════════════════════════════════════════
+function renderPool() {
+  const grid = document.getElementById('poolGrid');
+  if (pool.length === 0) {
+    grid.innerHTML = '<div class="pool-empty">Upload a batch of plant images.<br/>Most uncertain image will appear here.</div>';
+    return;
+  }
+
+  grid.innerHTML = pool.map(item => {
+    const uncPct = Math.round(item.uncertainty * 100);
+    const uncColor = item.uncertainty > 0.7 ? '#ef4444' : item.uncertainty > 0.4 ? '#f59e0b' : '#22c55e';
+    const labelClass = item.label >= 0 ? `labeled-${item.label}` : '';
+    const isActive = item.id === currentId ? 'active' : '';
+    const badgeColor = item.label >= 0 ? CLASSES[item.label].color : '';
+    const badgeTxt = item.label >= 0 ? '✓' : '';
+
+    return `
+      <div class="pool-thumb ${labelClass} ${isActive}" onclick="selectItem('${item.id}')" title="${item.label>=0?CLASSES[item.label].name:'Unlabeled'} · unc:${uncPct}%">
+        <img src="${item.url}" loading="lazy" alt=""/>
+        <div class="pool-label-badge" style="background:${badgeColor}">${badgeTxt}</div>
+        <div class="pool-unc-bar">
+          <div class="pool-unc-fill" style="width:${uncPct}%;background:${uncColor}"></div>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// UI — Disease buttons + confidence bars
+// ═══════════════════════════════════════════════════════════════════════════
+function buildUI() {
+  // Disease buttons
+  const grid = document.getElementById('diseaseGrid');
+  grid.innerHTML = CLASSES.map((c,i) => `
+    <button class="disease-btn db-${i}" onclick="submitLabel(${i})" disabled>
+      ${c.name}
+    </button>
+  `).join('');
+
+  // Confidence bars
+  const bars = document.getElementById('confBars');
+  bars.innerHTML = CLASSES.map((c,i) => `
+    <div class="cbar-row">
+      <span class="cbar-name">${c.name}</span>
+      <div class="cbar-track">
+        <div class="cbar-fill" id="cbar${i}" style="width:${Math.round(100/N_CLASSES)}%;background:${c.color}"></div>
+      </div>
+      <span class="cbar-pct" id="cpct${i}">${Math.round(100/N_CLASSES)}%</span>
+    </div>
+  `).join('');
+
+  // Coverage list
+  const cov = document.getElementById('coverageList');
+  cov.innerHTML = CLASSES.map((c,i) => `
+    <div class="cov-row">
+      <div class="cov-dot" style="background:${c.color}"></div>
+      <span class="cov-name">${c.short}</span>
+      <div class="cov-bar-track">
+        <div class="cov-bar-fill" id="covBar${i}" style="width:0%;background:${c.color}"></div>
+      </div>
+      <span class="cov-count" id="covCount${i}">0</span>
+    </div>
+  `).join('');
+}
+
+function updateConfBars(probs) {
+  CLASSES.forEach((c, i) => {
+    const pct = Math.round(probs[i] * 100);
+    document.getElementById(`cbar${i}`).style.width = pct + '%';
+    document.getElementById(`cpct${i}`).textContent = pct + '%';
+  });
+}
+
+function updateCoverage() {
+  const max = Math.max(...classCounts, 1);
+  CLASSES.forEach((c, i) => {
+    document.getElementById(`covBar${i}`).style.width = (classCounts[i]/max*100) + '%';
+    document.getElementById(`covCount${i}`).textContent = classCounts[i];
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// LABELING FLOW
+// ═══════════════════════════════════════════════════════════════════════════
+function showMostUncertain() {
+  const unlabeled = pool.filter(p => p.label === -1);
+  if (!unlabeled.length) {
+    showEmpty('All images labeled! Great work.');
+    return;
+  }
+  // Prefer non-skipped images; fall back to skipped ones if all have been skipped
+  const candidates = unlabeled.filter(p => !skippedIds.has(p.id));
+  const pool_ = candidates.length ? candidates : unlabeled;
+  // If we exhausted non-skipped items, reset skipped set
+  if (!candidates.length) skippedIds.clear();
+  const top = pool_.reduce((a,b) => a.uncertainty > b.uncertainty ? a : b);
+  selectItem(top.id);
+}
+
+async function selectItem(id) {
+  const item = pool.find(p => p.id === id);
+  if (!item) return;
+
+  currentId = id;
+
+  // Show image
+  const img = document.getElementById('stageImg');
+  const empty = document.getElementById('stageEmpty');
+  img.src = item.url;
+  img.style.display = 'block';
+  empty.style.display = 'none';
+
+  // Uncertainty overlay
+  const uncOverlay = document.getElementById('uncOverlay');
+  const uncPct = Math.round(item.uncertainty * 100);
+  const cls = item.uncertainty > 0.7 ? 'unc-high' : item.uncertainty > 0.4 ? 'unc-med' : 'unc-low';
+  uncOverlay.className = 'unc-overlay ' + cls;
+  uncOverlay.textContent = `Uncertainty: ${uncPct}%`;
+  uncOverlay.style.display = 'block';
+
+  // Rank overlay
+  const unlabeled = pool.filter(p => p.label === -1);
+  const rank = unlabeled.sort((a,b) => b.uncertainty - a.uncertainty).findIndex(p => p.id === id) + 1;
+  const rankOverlay = document.getElementById('rankOverlay');
+  rankOverlay.textContent = `#${rank} most uncertain`;
+  rankOverlay.style.display = 'block';
+
+  // Update confidence bars
+  updateConfBars(item.probs);
+
+  // Enable buttons
+  document.querySelectorAll('.disease-btn').forEach(b => b.disabled = false);
+  document.getElementById('nextBtn').disabled = false;
+
+  // Highlight in pool
+  renderPool();
+}
+
+function showEmpty(msg) {
+  document.getElementById('stageImg').style.display = 'none';
+  const e = document.getElementById('stageEmpty');
+  e.style.display = 'flex';
+  e.innerHTML = `<div class="stage-empty-icon">✓</div><p>${msg}</p>`;
+  document.getElementById('uncOverlay').style.display = 'none';
+  document.getElementById('rankOverlay').style.display = 'none';
+  document.querySelectorAll('.disease-btn').forEach(b => b.disabled = true);
+  document.getElementById('nextBtn').disabled = true;
+}
+
+async function submitLabel(classIdx) {
+  const item = pool.find(p => p.id === currentId);
+  if (!item) return;
+
+  item.label = classIdx;
+  classCounts[classIdx]++;
+  labelCount++;
+  labelsSinceRetrain++;
+
+  document.getElementById('sLabeled').textContent = labelCount;
+  updateCoverage();
+
+  // Flash
+  const stage = document.getElementById('imageStage');
+  stage.style.outline = `3px solid ${CLASSES[classIdx].color}`;
+  setTimeout(() => stage.style.outline = 'none', 350);
+
+  log(`Labeled as: ${CLASSES[classIdx].name}`, 'info');
+
+  // Check if we can retrain
+  const coveredClasses = classCounts.filter(c => c > 0).length;
+  document.getElementById('retrainBtn').disabled = coveredClasses < 2;
+
+  // Auto retrain
+  if (labelsSinceRetrain >= AUTO_RETRAIN_EVERY && coveredClasses >= 2) {
+    await retrain();
+  } else {
+    renderPool();
+    // Move to next most uncertain
+    pool.sort((a,b) => {
+      if (a.label === -1 && b.label === -1) return b.uncertainty - a.uncertainty;
+      if (a.label === -1) return -1;
+      if (b.label === -1) return 1;
+      return 0;
+    });
+    showMostUncertain();
+  }
+}
+
+function skipCurrent() {
+  // Mark current image as skipped so showMostUncertain won't select it again
+  // until all other unlabeled images have been offered
+  if (currentId) skippedIds.add(currentId);
+  showMostUncertain();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TRAINING
+// ═══════════════════════════════════════════════════════════════════════════
+async function retrain() {
+  if (isTraining) return;
+
+  const labeled = pool.filter(p => p.label >= 0);
+  if (labeled.length < 2) {
+    log('Need at least 2 labeled samples', 'err');
+    return;
+  }
+
+  const coveredClasses = new Set(labeled.map(p => p.label));
+  if (coveredClasses.size < 2) {
+    log('Need at least 2 different classes to train', 'err');
+    return;
+  }
+
+  isTraining = true;
+  setStatus('training', 'Training...');
+  document.getElementById('retrainBtn').disabled = true;
+  log(`Retrain #${retrainCount+1} · ${labeled.length} samples · ${coveredClasses.size} classes`, 'info');
+
+  await tf.nextFrame();
+
+  const xs = tf.tensor2d(labeled.map(p => p.features));
+  const ys = tf.oneHot(tf.tensor1d(labeled.map(p => p.label), 'int32'), N_CLASSES).toFloat();
+
+  // Only rebuild head from scratch on first retrain; otherwise fine-tune existing weights
+  if (retrainCount === 0) buildHead();
+
+  const n = labeled.length;
+  // Val split only meaningful with 20+ samples (else 1-3 val samples = noise)
+  const useVal = n >= 20;
+  const epochs = useVal ? 25 : 20;
+
+  let lastAcc = 0;
+  await classifier.fit(xs, ys, {
+    epochs,
+    batchSize: Math.min(16, n),
+    shuffle: true,
+    validationSplit: useVal ? 0.15 : 0,
+    callbacks: {
+      onEpochEnd: async (epoch, logs) => {
+        if ((epoch+1) % 5 === 0 || epoch === 0) {
+          const acc = useVal ? (logs.val_acc ?? logs.val_accuracy ?? logs.acc) : logs.acc;
+          const tag = useVal ? '(val)' : '(train - too few for val)';
+          log(`ep ${epoch+1}/${epochs} loss=${logs.loss.toFixed(3)} acc=${(acc*100).toFixed(1)}% ${tag}`);
+          await tf.nextFrame();
+        }
+        lastAcc = useVal ? (logs.val_acc ?? logs.val_accuracy ?? logs.acc) : logs.acc;
+      }
+    }
+  });
+
+  xs.dispose();
+  ys.dispose();
+
+  retrainCount++;
+  labelsSinceRetrain = 0;
+  skippedIds.clear(); // uncertainty rankings change after retrain, so skips reset
+  const accPct = Math.round(lastAcc * 100);
+  accHistory.push(accPct);
+
+  document.getElementById('sRetrains').textContent = retrainCount;
+  document.getElementById('sAcc').textContent = accPct + '%';
+
+  log(`Retrain #${retrainCount} complete · acc=${accPct}%`, 'good');
+
+  // Rescore entire pool
+  await rescorePool();
+  renderPool();
+  drawChart();
+
+  // Show next most uncertain
+  showMostUncertain();
+
+  isTraining = false;
+  setStatus('ready', 'Ready');
+  document.getElementById('retrainBtn').disabled = false;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CHART
+// ═══════════════════════════════════════════════════════════════════════════
+function drawChart() {
+  const canvas = document.getElementById('accChart');
+  const parent = canvas.parentElement;
+  canvas.width = parent.clientWidth;
+  canvas.height = parent.clientHeight;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const pad = { t:8, r:8, b:20, l:32 };
+  const w = W - pad.l - pad.r;
+  const h = H - pad.t - pad.b;
+
+  ctx.clearRect(0,0,W,H);
+
+  // Grid
+  const gridColor = 'rgba(0,0,0,0.06)';
+  for (let v = 0; v <= 100; v += 25) {
+    const y = pad.t + h - (v/100)*h;
+    ctx.strokeStyle = gridColor;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(pad.l, y);
+    ctx.lineTo(pad.l+w, y);
+    ctx.stroke();
+    ctx.fillStyle = '#8a8a72';
+    ctx.font = '9px DM Mono, monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText(v+'%', pad.l-4, y+3);
+  }
+
+  if (accHistory.length === 0) {
+    ctx.fillStyle = '#8a8a72';
+    ctx.font = '10px DM Mono';
+    ctx.textAlign = 'center';
+    ctx.fillText('No retrains yet', W/2, H/2);
+    return;
+  }
+
+  const pts = accHistory.map((a,i) => ({
+    x: pad.l + (accHistory.length === 1 ? w/2 : i/(accHistory.length-1)*w),
+    y: pad.t + h - (a/100)*h
+  }));
+
+  // Area fill
+  const grad = ctx.createLinearGradient(0, pad.t, 0, pad.t+h);
+  grad.addColorStop(0, 'rgba(45,106,45,0.15)');
+  grad.addColorStop(1, 'rgba(45,106,45,0)');
+  if (pts.length > 1) {
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pad.t+h);
+    pts.forEach(p => ctx.lineTo(p.x, p.y));
+    ctx.lineTo(pts[pts.length-1].x, pad.t+h);
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    pts.forEach(p => ctx.lineTo(p.x, p.y));
+    ctx.strokeStyle = '#2d6a2d';
+    ctx.lineWidth = 2;
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+  }
+
+  pts.forEach(p => {
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 3, 0, Math.PI*2);
+    ctx.fillStyle = '#2d6a2d';
+    ctx.fill();
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════════════════════════════════
+function setStatus(state, msg) {
+  document.getElementById('statusText').textContent = msg;
+  const dot = document.getElementById('pulseEl');
+  dot.className = 'pulse ' + (state === 'training' ? 'training' : state === 'ready' ? '' : 'idle');
+}
+
+function log(msg, type='') {
+  const scroll = document.getElementById('logScroll');
+  const el = document.createElement('div');
+  el.className = 'log-entry ' + type;
+  el.textContent = '> ' + msg;
+  scroll.prepend(el);
+  while (scroll.children.length > 50) scroll.lastChild.remove();
+}
+
+function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+window.addEventListener('resize', drawChart);
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BOOT
+// ═══════════════════════════════════════════════════════════════════════════
+init().catch(err => {
+  document.getElementById('loadSub').textContent = 'Error: ' + err.message;
+  console.error(err);
+  setTimeout(() => {
+    document.getElementById('loadingOverlay').style.display = 'none';
+    document.getElementById('app').style.display = 'block';
+  }, 2000);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TAB SWITCHING
+// ═══════════════════════════════════════════════════════════════════════════
+function switchTab(tab, btn) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+  document.getElementById('tab-' + tab).classList.add('active');
+  btn.classList.add('active');
+
+  if (tab === 'field') {
+    // Show warning if no model trained yet
+    const warn = document.getElementById('noModelWarn');
+    warn.classList.toggle('show', retrainCount === 0);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DISEASE KNOWLEDGE BASE
+// ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
+// TREATMENT BANDIT — Bayesian Multi-Armed Bandit (Beta Distribution)
+// Each treatment has alpha (successes) and beta (failures).
+// Score = alpha / (alpha + beta) = empirical success rate.
+// This is real online learning — not rule-based.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const DISEASE_INFO = [
+  {
+    name: 'Healthy',
+    desc: 'Your plant appears healthy. Continue your current care routine.',
+    urgency: 'No action required. Monitor regularly.',
+    treatments: [
+      { id:'h0', text:'Maintain regular watering — avoid overwatering', alpha:2, beta:1 },
+      { id:'h1', text:'Ensure proper spacing between plants for airflow', alpha:2, beta:1 },
+      { id:'h2', text:'Apply balanced fertilizer on schedule', alpha:2, beta:1 },
+      { id:'h3', text:'Monitor weekly for early signs of disease', alpha:2, beta:1 },
+    ]
+  },
+  {
+    name: 'Early Blight',
+    desc: 'Caused by Alternaria solani. Dark brown spots with concentric rings on older leaves. Can reduce yield by 50% if untreated.',
+    urgency: 'Moderate urgency. Act within the week.',
+    treatments: [
+      { id:'eb0', text:'Apply chlorothalonil fungicide immediately', alpha:2, beta:1 },
+      { id:'eb1', text:'Apply copper-based fungicide as alternative', alpha:2, beta:1 },
+      { id:'eb2', text:'Remove and destroy infected leaves', alpha:2, beta:1 },
+      { id:'eb3', text:'Water at base only — avoid wetting foliage', alpha:2, beta:1 },
+      { id:'eb4', text:'Prune dense foliage to improve airflow', alpha:2, beta:1 },
+      { id:'eb5', text:'Apply mancozeb as broad-spectrum alternative', alpha:1, beta:1 },
+      { id:'eb6', text:'Use azoxystrobin systemic fungicide', alpha:1, beta:1 },
+    ]
+  },
+  {
+    name: 'Late Blight',
+    desc: 'Caused by Phytophthora infestans — same pathogen as the Irish Famine. Spreads extremely fast in cool, wet conditions.',
+    urgency: '⚠️ HIGH URGENCY. Act immediately. Can destroy crop within days.',
+    treatments: [
+      { id:'lb0', text:'Apply mancozeb fungicide immediately', alpha:2, beta:1 },
+      { id:'lb1', text:'Apply metalaxyl-based fungicide', alpha:2, beta:1 },
+      { id:'lb2', text:'Remove and bag all infected material — do not leave in field', alpha:2, beta:1 },
+      { id:'lb3', text:'Avoid working in field when wet to prevent spread', alpha:2, beta:1 },
+      { id:'lb4', text:'Apply cymoxanil + mancozeb combination', alpha:1, beta:1 },
+      { id:'lb5', text:'Remove severely infected plants entirely', alpha:1, beta:1 },
+      { id:'lb6', text:'Apply fosetyl-aluminum systemic treatment', alpha:1, beta:1 },
+    ]
+  },
+  {
+    name: 'Leaf Mold',
+    desc: 'Caused by Passalora fulva. Yellow patches on upper leaf, olive-gray mold beneath. Thrives in high humidity.',
+    urgency: 'Moderate urgency. Particularly problematic in greenhouses.',
+    treatments: [
+      { id:'lm0', text:'Improve ventilation — increase spacing between plants', alpha:2, beta:1 },
+      { id:'lm1', text:'Apply copper-based fungicide to affected areas', alpha:2, beta:1 },
+      { id:'lm2', text:'Reduce humidity below 85% if in greenhouse', alpha:2, beta:1 },
+      { id:'lm3', text:'Remove heavily infected leaves', alpha:2, beta:1 },
+      { id:'lm4', text:'Switch to drip irrigation — avoid overhead watering', alpha:1, beta:1 },
+      { id:'lm5', text:'Apply chlorothalonil preventively in humid conditions', alpha:1, beta:1 },
+    ]
+  },
+  {
+    name: 'Bacterial Spot',
+    desc: 'Caused by Xanthomonas bacteria. Small water-soaked spots turning brown with yellow halos. Spreads via rain and tools.',
+    urgency: 'Moderate urgency. Disinfect tools. Avoid working plants when wet.',
+    treatments: [
+      { id:'bs0', text:'Apply copper hydroxide bactericide', alpha:2, beta:1 },
+      { id:'bs1', text:'Apply copper sulfate bactericide', alpha:2, beta:1 },
+      { id:'bs2', text:'Disinfect all tools with 10% bleach solution', alpha:2, beta:1 },
+      { id:'bs3', text:'Remove infected plant debris from field', alpha:2, beta:1 },
+      { id:'bs4', text:'Avoid overhead irrigation', alpha:2, beta:1 },
+      { id:'bs5', text:'Apply streptomycin antibiotic spray', alpha:1, beta:1 },
+      { id:'bs6', text:'Use acibenzolar-S-methyl as resistance inducer', alpha:1, beta:1 },
+    ]
+  },
+  {
+    name: 'Yellow Leaf Curl',
+    desc: 'Caused by TYLCV virus, transmitted by whiteflies (Bemisia tabaci). Severe stunting and leaf curling. No cure once infected.',
+    urgency: '⚠️ HIGH URGENCY. No cure for infected plants. Focus on stopping spread.',
+    treatments: [
+      { id:'yc0', text:'Remove and destroy infected plants immediately', alpha:2, beta:1 },
+      { id:'yc1', text:'Apply imidacloprid insecticide to control whiteflies', alpha:2, beta:1 },
+      { id:'yc2', text:'Install yellow sticky traps to catch whiteflies', alpha:2, beta:1 },
+      { id:'yc3', text:'Use reflective silver mulch to deter whiteflies', alpha:1, beta:1 },
+      { id:'yc4', text:'Apply spinosad organic insecticide', alpha:1, beta:1 },
+      { id:'yc5', text:'Plant resistant varieties in next season', alpha:1, beta:1 },
+      { id:'yc6', text:'Apply neem oil as organic whitefly deterrent', alpha:1, beta:1 },
+    ]
+  }
+];
+
+// Sample from Beta(alpha, beta) — Thompson Sampling
+function betaSample(alpha, beta) {
+  // Approximation using gamma sampling
+  const x = gammaSample(alpha);
+  const y = gammaSample(beta);
+  return x / (x + y);
+}
+
+function gammaSample(shape) {
+  // Marsaglia-Tsang method for shape >= 1
+  if (shape < 1) return gammaSample(1 + shape) * Math.pow(Math.random(), 1 / shape);
+  const d = shape - 1/3;
+  const c = 1 / Math.sqrt(9 * d);
+  while (true) {
+    let x, v;
+    do { x = randn(); v = 1 + c * x; } while (v <= 0);
+    v = v * v * v;
+    const u = Math.random();
+    if (u < 1 - 0.0331 * (x*x) * (x*x)) return d * v;
+    if (Math.log(u) < 0.5 * x*x + d * (1 - v + Math.log(v))) return d * v;
+  }
+}
+
+function randn() {
+  let u = 0, v = 0;
+  while (u === 0) u = Math.random();
+  while (v === 0) v = Math.random();
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+
+function treatmentScore(t) {
+  return t.alpha / (t.alpha + t.beta);
+}
+
+async function generateTreatments(classIdx) {
+  const info = DISEASE_INFO[classIdx];
+  const tList = document.getElementById('treatmentList');
+  const previousFeedback = diseaseFeedbackLog[classIdx];
+
+  // Show loading state
+  tList.innerHTML = `<div style="padding:16px;color:var(--ink3);font-size:11px;display:flex;align-items:center;gap:10px">
+    <div style="width:12px;height:12px;border:2px solid var(--accent);border-top-color:transparent;border-radius:50%;animation:spin 0.8s linear infinite;flex-shrink:0"></div>
+    Generating personalized treatment plan...
+  </div>`;
+
+  // Build prompt with feedback history as context
+  let prompt = `You are an expert agronomist. A farmer has uploaded a photo of their tomato plant and the disease classifier identified: ${info.name}.
+
+Disease info: ${info.desc}`;
+
+  if (previousFeedback.length > 0) {
+    prompt += `
+
+This farmer has tried treatments before for this disease and provided the following feedback:
+`;
+    previousFeedback.forEach((f, i) => {
+      prompt += `- Attempt ${i+1}: "${f.feedback}" (${f.timestamp})
+`;
+    });
+    prompt += `
+Based on this feedback history, the previous treatments clearly have not been fully effective. Adapt your recommendations accordingly — suggest different products, approaches, or dosages that address what hasn't worked.`;
+  } else {
+    prompt += `
+
+This is the first time this farmer is treating this disease. Provide standard evidence-based treatment recommendations.`;
+  }
+
+  prompt += `
+
+Provide exactly 4 specific, actionable treatment steps tailored to this farmer's situation. Format as a JSON array of strings, nothing else. Example: ["Step one", "Step two", "Step three", "Step four"]`;
+
+  try {
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${GROQ_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: GROQ_MODEL,
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.4,
+        max_tokens: 400
+      })
+    });
+
+    const data = await response.json();
+    const raw = data.choices[0].message.content.trim();
+
+    // Parse JSON array from response
+    const jsonMatch = raw.match(/\[[\s\S]*\]/);
+    const steps = jsonMatch ? JSON.parse(jsonMatch[0]) : [raw];
+
+    tList.innerHTML = steps.map((step, i) => `
+      <div class="treatment-item">
+        <span class="step">${i+1}.</span>
+        <span>${step}</span>
+      </div>`).join('');
+
+    // Remove any previous adaptation badge before inserting a new one
+    const existingBadge = tList.previousElementSibling;
+    if (existingBadge && existingBadge.dataset.adaptBadge) existingBadge.remove();
+
+    if (previousFeedback.length > 0) {
+      const badge = document.createElement('div');
+      badge.dataset.adaptBadge = '1';
+      badge.style.cssText = 'background:#f0f4ff;border:1px solid #93c5fd;border-radius:6px;padding:10px 14px;margin-bottom:10px;font-size:11px;color:#1e40af;line-height:1.6';
+      badge.innerHTML = `🔄 <strong>Adapted from your ${previousFeedback.length} previous report(s).</strong> These recommendations account for what hasn't worked before.`;
+      tList.parentNode.insertBefore(badge, tList);
+    }
+
+  } catch(err) {
+    tList.innerHTML = `<div style="color:var(--red);font-size:11px;padding:8px">Failed to generate treatment: ${err.message}</div>`;
+    log('Groq API error: ' + err.message, 'err');
+  }
+}
+
+// Keep old bandit function for backward compat but unused for text now
+function renderTreatments(classIdx) { generateTreatments(classIdx); }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FIELD ASSISTANT STATE
+// ═══════════════════════════════════════════════════════════════════════════
+let fieldImageURL = null;
+let fieldImageTensor = null;
+let fieldPredictedClass = -1;
+let feedbackHistory = [];
+// Per-disease feedback history for LLM context
+const diseaseFeedbackLog = Array.from({length: 6}, () => []); // array of {feedback, timestamp}
+const GROQ_KEY = 'YOUR_GROQ_API_KEY_HERE'; // Replace with your Groq API key from https://console.groq.com/
+const GROQ_MODEL = 'llama-3.1-8b-instant';
+
+document.getElementById('fieldFileInput').addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  e.target.value = '';
+
+  fieldImageURL = URL.createObjectURL(file);
+  const preview = document.getElementById('fieldPreview');
+  preview.src = fieldImageURL;
+  preview.style.display = 'block';
+  document.getElementById('fieldDropText').style.display = 'none';
+  document.getElementById('fieldAnalyzeBtn').disabled = false;
+
+  // Reset results fully
+  document.getElementById('resultCard').classList.remove('show');
+  document.getElementById('feedbackCard').classList.remove('show');
+  document.getElementById('showFeedbackBtn').style.display = 'none';
+  document.getElementById('fbText').value = '';
+  document.getElementById('fbSubmit').disabled = true;
+  document.getElementById('fbSubmit').textContent = 'Submit Feedback → Model Will Learn';
+  fieldPredictedClass = -1;
+});
+
+async function analyzeField() {
+  if (!fieldImageURL) return;
+
+  const btn = document.getElementById('fieldAnalyzeBtn');
+  btn.disabled = true;
+  btn.textContent = 'Analyzing...';
+
+  const warn = document.getElementById('noModelWarn');
+  if (retrainCount === 0) {
+    warn.classList.add('show');
+    btn.disabled = false;
+    btn.textContent = 'Analyze Plant →';
+    return;
+  }
+  warn.classList.remove('show');
+
+  const imgEl = await loadImageElement(fieldImageURL);
+  if (fieldImageTensor) fieldImageTensor.dispose();
+  fieldImageTensor = tf.tidy(() =>
+    tf.browser.fromPixels(imgEl)
+      .resizeBilinear([224,224])
+      .toFloat().div(127.5).sub(1)
+      .expandDims(0)
+  );
+
+  const featTensor = tf.tidy(() => extractFeatures(fieldImageTensor));
+  const featData = Array.from(await featTensor.data());
+  featTensor.dispose();
+
+  const probs = await inferSingle(featData);
+  fieldPredictedClass = probs.indexOf(Math.max(...probs));
+  const conf = Math.round(probs[fieldPredictedClass] * 100);
+
+  const info = DISEASE_INFO[fieldPredictedClass];
+  const cls = CLASSES[fieldPredictedClass];
+
+  document.getElementById('resultDot').style.background = cls.color;
+  document.getElementById('resultName').textContent = cls.name;
+  document.getElementById('resultName').style.color = cls.color;
+  document.getElementById('resultConf').innerHTML = `Model confidence<br><strong style="font-size:18px;color:${cls.color}">${conf}%</strong>`;
+  document.getElementById('resultDesc').textContent = info.desc;
+  document.getElementById('resultUrgency').textContent = info.urgency;
+
+  // Render treatments using bandit scores
+  renderTreatments(fieldPredictedClass);
+
+  document.getElementById('resultCard').classList.add('show');
+  document.getElementById('feedbackCard').classList.remove('show');
+  document.getElementById('showFeedbackBtn').style.display = 'block';
+
+  document.getElementById('fbText').value = '';
+  document.getElementById('fbSubmit').disabled = true;
+
+  btn.disabled = false;
+  btn.textContent = 'Analyze Plant →';
+}
+
+function showFeedback() {
+  document.getElementById('showFeedbackBtn').style.display = 'none';
+  document.getElementById('feedbackCard').classList.add('show');
+}
+
+// selectFeedback no longer needed — replaced by free-text textarea
+
+async function submitFeedback() {
+  const fbText = document.getElementById('fbText').value.trim();
+  if (!fbText || fieldPredictedClass === -1) return;
+
+  const btn = document.getElementById('fbSubmit');
+  btn.disabled = true;
+  btn.textContent = 'Learning from feedback...';
+
+  // Store farmer's written feedback — LLM reads this next time
+  diseaseFeedbackLog[fieldPredictedClass].push({
+    feedback: fbText,
+    timestamp: new Date().toLocaleDateString()
+  });
+  log(`Feedback saved for ${CLASSES[fieldPredictedClass].name}: "${fbText.slice(0,50)}..."`, 'good');
+
+  // ── ML classifier: add confirmed sample to training pool ──────────────
+  if (fieldImageTensor) {
+    const featTensor = tf.tidy(() => extractFeatures(fieldImageTensor));
+    const featData = Array.from(await featTensor.data());
+    featTensor.dispose();
+    pool.push({
+      id: 'field_' + Date.now(), file: null, url: fieldImageURL,
+      features: featData, label: fieldPredictedClass, uncertainty: 0,
+      probs: CLASSES.map((_,i) => i===fieldPredictedClass ? 0.95 : 0.01), fromFeedback: true
+    });
+    classCounts[fieldPredictedClass]++;
+    labelCount++;
+    labelsSinceRetrain++;
+    updateCoverage();
+    document.getElementById('sPool').textContent = pool.length;
+    document.getElementById('poolCount').textContent = pool.length + ' images';
+    document.getElementById('sLabeled').textContent = labelCount;
+    renderPool();
+    if (labelsSinceRetrain >= AUTO_RETRAIN_EVERY) await retrain();
+  }
+
+  // ── Feedback history ────────────────────────────────────────────────────
+  feedbackHistory.unshift({
+    url: fieldImageURL,
+    disease: CLASSES[fieldPredictedClass].name,
+    color: CLASSES[fieldPredictedClass].color,
+    text: fbText.slice(0, 80) + (fbText.length > 80 ? '...' : ''),
+    time: new Date().toLocaleTimeString()
+  });
+  renderFeedbackHistory();
+
+  btn.textContent = 'Feedback submitted ✓';
+  document.getElementById('feedbackCard').classList.remove('show');
+  document.getElementById('showFeedbackBtn').style.display = 'none';
+  setTimeout(() => {
+    btn.disabled = false;
+    btn.textContent = 'Submit Feedback → Model Will Learn';
+  }, 2000);
+}
+
+function renderFeedbackHistory() {
+  const hist = document.getElementById('fbHistory');
+  const list = document.getElementById('fbHistoryList');
+  if (!feedbackHistory.length) return;
+
+  hist.classList.add('show');
+  list.innerHTML = feedbackHistory.map(h => `
+    <div class="fb-item">
+      <img src="${h.url}" alt=""/>
+      <div class="fb-item-info">
+        <div class="fb-item-disease" style="color:${h.color}">${h.disease}</div>
+        <div class="fb-item-outcome" style="font-size:10px;color:var(--ink3);margin-top:2px">${h.text}</div>
+        <div style="font-size:9px;color:var(--ink3);opacity:0.6">${h.time}</div>
+      </div>
+    </div>
+  `).join('');
+}
+
+</script>
+</body>
+</html>
